@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
@@ -41,13 +46,18 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusInternalServerError, "unable to parse file data", err)
 		return
 	}
-	mediaType := fileHeaders.Header.Get("Content-Type")
 
-	imageData, err := io.ReadAll(fileData)
+	mediaType, _, err := mime.ParseMediaType(fileHeaders.Header.Get("Content-Type"))
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to read image file data", err)
+		respondWithError(w, http.StatusInternalServerError, "unable parse mime type from header", err)
 		return
 	}
+	/*
+		imageData, err := io.ReadAll(fileData)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "unable to read image file data", err)
+			return
+		}*/
 
 	vidMetadata, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -60,17 +70,37 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dataURL := fmt.Sprintf("data:%s;base64,%v", mediaType, base64.StdEncoding.EncodeToString(imageData))
-
-	/*newThumbnail := thumbnail{
-		data:      imageData,
-		mediaType: mediaType,
+	thumbnailID := make([]byte, 32)
+	rand.Read(thumbnailID)
+	assetName := fmt.Sprintf("%v.%s", base64.StdEncoding.EncodeToString(thumbnailID), getFileExtension(mediaType))
+	assetPath := filepath.Join(cfg.assetsRoot, assetName)
+	thumbnailURL := fmt.Sprintf("http://localhost:8091/%s", assetPath)
+	assetFile, err := os.Create(assetPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "invalid asset path", err)
+		return
 	}
-	videoThumbnails[videoID] = newThumbnail
-	thumbnailURL := fmt.Sprintf("http://localhost:8091/api/thumbnails/%v", videoID)
-	*/
-	vidMetadata.ThumbnailURL = &dataURL
+	defer assetFile.Close()
+
+	n, err := io.Copy(assetFile, fileData)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to write file contents to asset location", err)
+		return
+	}
+	if n < 1 {
+		respondWithError(w, http.StatusInternalServerError, "no file contents to write", err)
+		return
+	}
+
+	vidMetadata.ThumbnailURL = &thumbnailURL
 	err = cfg.db.UpdateVideo(vidMetadata)
 
 	respondWithJSON(w, http.StatusOK, database.Video{})
+}
+
+func getFileExtension(s string) string {
+	if strings.Contains(s, "image") {
+		return strings.Replace(s, "image/", "", -1)
+	}
+	return ""
 }
