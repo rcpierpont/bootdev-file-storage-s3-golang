@@ -1,18 +1,22 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	db               database.Client
+	s3Client         *s3.Client
 	jwtSecret        string
 	platform         string
 	filepathRoot     string
@@ -24,8 +28,8 @@ type apiConfig struct {
 }
 
 func main() {
-	godotenv.Load(".env")
 
+	godotenv.Load(".env")
 	pathToDB := os.Getenv("DB_PATH")
 	if pathToDB == "" {
 		log.Fatal("DB_URL must be set")
@@ -78,6 +82,7 @@ func main() {
 
 	cfg := apiConfig{
 		db:               db,
+		s3Client:         nil,
 		jwtSecret:        jwtSecret,
 		platform:         platform,
 		filepathRoot:     filepathRoot,
@@ -87,10 +92,15 @@ func main() {
 		s3CfDistribution: s3CfDistribution,
 		port:             port,
 	}
+	awsDefault, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(cfg.s3Region))
+	if err != nil {
+		log.Fatalf("Couldn't load aws config: %v\n", err)
+	}
 
+	cfg.s3Client = s3.NewFromConfig(awsDefault)
 	err = cfg.ensureAssetsDir()
 	if err != nil {
-		log.Fatalf("Couldn't create assets directory: %v", err)
+		log.Fatalf("Couldn't create assets directory: %v\n", err)
 	}
 
 	mux := http.NewServeMux()

@@ -40,12 +40,17 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	// TODO: implement the upload here
 	const maxMemory = 10 << 20
-	r.ParseMultipartForm(maxMemory)
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to parse multipart form data", err)
+	}
+
 	fileData, fileHeaders, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to parse file data", err)
 		return
 	}
+	defer fileData.Close()
 
 	mediaType, _, err := mime.ParseMediaType(fileHeaders.Header.Get("Content-Type"))
 	if err != nil {
@@ -101,6 +106,9 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 func getFileExtension(s string) string {
 	if strings.Contains(s, "image") {
 		return strings.Replace(s, "image/", "", -1)
+	}
+	if strings.Contains(s, "video") {
+		return strings.Replace(s, "video/", "", -1)
 	}
 	return ""
 }
