@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -85,26 +87,41 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "unable to copy file data to temp", err)
 		return
 	}
-	_, err = tempFile.Seek(0, io.SeekStart)
+
+	processedPath, err := processVideoForFastStart(tempFile.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to reset temp file reader", err)
+		respondWithError(w, http.StatusBadRequest, "unable to process temp video for faststart", err)
+		return
+	}
+
+	processedFile, err := os.Open(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to determine video aspect ratio", err)
+		return
+	}
+	defer os.Remove(processedFile.Name())
+	defer processedFile.Close()
+
+	aspectRatio, err := getVideoAspectRatio(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to determine video aspect ratio", err)
 		return
 	}
 
 	vidID := make([]byte, 32)
 	rand.Read(vidID)
-	vidKey := fmt.Sprintf("%v.%s", base64.StdEncoding.EncodeToString(vidID), getFileExtension(mediaType))
-
+	vidKey := fmt.Sprintf("%s/%v.%s", aspectRatio, base64.URLEncoding.EncodeToString(vidID), getFileExtension(mediaType))
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &vidKey,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &mediaType,
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to upload video to s3", err)
 		return
 	}
+
 	vidURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, vidKey)
 	vidMetadata.VideoURL = &vidURL
 	err = cfg.db.UpdateVideo(vidMetadata)
@@ -113,4 +130,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, database.Video{})
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outPath := filePath + ".processing"
+	fmt.Printf("inpath: %s\noutpath: %s\n", filePath, outPath)
+	var stderr bytes.Buffer
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outPath)
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	fmt.Println(stderr.String())
+	if err != nil {
+		fmt.Println("unable to execute ffmpeg command")
+		return "", err
+	}
+
+	return outPath, nil
 }

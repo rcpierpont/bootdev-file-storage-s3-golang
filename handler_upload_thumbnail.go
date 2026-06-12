@@ -77,7 +77,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	thumbnailID := make([]byte, 32)
 	rand.Read(thumbnailID)
-	assetName := fmt.Sprintf("%v.%s", base64.StdEncoding.EncodeToString(thumbnailID), getFileExtension(mediaType))
+	assetName := fmt.Sprintf("%v.%s", base64.URLEncoding.EncodeToString(thumbnailID), getFileExtension(mediaType))
 	assetPath := filepath.Join(cfg.assetsRoot, assetName)
 	thumbnailURL := fmt.Sprintf("http://localhost:8091/%s", assetPath)
 	assetFile, err := os.Create(assetPath)
