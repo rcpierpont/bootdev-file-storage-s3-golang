@@ -1,12 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"math"
 	"net/http"
-	"os/exec"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
@@ -121,42 +117,4 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 	}
 
 	respondWithJSON(w, http.StatusOK, videos)
-}
-
-func getVideoAspectRatio(filePath string) (string, error) {
-
-	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
-	buffer := bytes.NewBuffer(make([]byte, 0))
-	cmd.Stdout = buffer
-
-	err := cmd.Run()
-	if err != nil {
-		fmt.Printf("error from getVideoAspectRatio 131: %v\n", err)
-		return "", err
-	}
-	type ratios struct {
-		Height int `json:"height"`
-		Width  int `json:"width"`
-	}
-	type streams struct {
-		Streams []ratios `json:"streams"`
-	}
-	data := streams{}
-	err = json.Unmarshal(buffer.Bytes(), &data)
-
-	if err != nil {
-		fmt.Printf("error from getVideoAspectRatio 144: %v\n", err)
-		return "", err
-	}
-
-	tolerance := 0.01
-	ratioStr := "other"
-	if math.Abs((float64(data.Streams[0].Height)/float64(data.Streams[0].Width))-9.0/16.0) < tolerance {
-		ratioStr = "landscape"
-	} else if math.Abs((float64(data.Streams[0].Height)/float64(data.Streams[0].Width))-16.0/9.0) < tolerance {
-		ratioStr = "portrait"
-	}
-
-	return ratioStr, nil
-
 }

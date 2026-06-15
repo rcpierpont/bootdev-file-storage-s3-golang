@@ -2,15 +2,17 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
@@ -18,6 +20,9 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
+	const maxMemory = 1 << 30
+	r.Body = http.MaxBytesReader(w, r.Body, maxMemory)
+
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
 	if err != nil {
@@ -37,36 +42,32 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	fmt.Println("uploading video", videoID, "by user", userID)
-
-	const maxMemory = 1 << 30
 	err = r.ParseMultipartForm(maxMemory)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to parse form data", err)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxMemory)
 
-	vidMetadata, err := cfg.db.GetVideo(videoID)
+	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "unable to find video metadata in database with ID provided", err)
 		return
 	}
 
-	if userID != vidMetadata.UserID {
+	if userID != video.UserID {
 		respondWithError(w, http.StatusUnauthorized, "not authorized", err)
 		return
 	}
 
-	vidData, vidHeaders, err := r.FormFile("video")
+	file, handler, err := r.FormFile("video")
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to parse video file and header from form data", err)
 	}
-	defer vidData.Close()
+	defer file.Close()
 
-	mediaType, _, err := mime.ParseMediaType(vidHeaders.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(handler.Header.Get("Content-Type"))
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable parse mime type from header", err)
+		respondWithError(w, http.StatusBadRequest, "unable parse mime type from header", err)
 		return
 	}
 	if mediaType != "video/mp4" {
@@ -76,55 +77,70 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	tempFile, err := os.CreateTemp("", "tubely-upload.mp4")
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "unable to write video to temp file", err)
+		respondWithError(w, http.StatusInternalServerError, "unable to write video to temp file", err)
 		return
 	}
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
-	_, err = io.Copy(tempFile, vidData)
+	_, err = io.Copy(tempFile, file)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to copy file data to temp", err)
 		return
 	}
+
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not reset file r/w position", err)
+		return
+	}
+
+	directory := ""
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error determining aspect ratio", err)
+		return
+	}
+	switch aspectRatio {
+	case "16:9":
+		directory = "landscape"
+	case "9:16":
+		directory = "portrait"
+	default:
+		directory = "other"
+	}
+
+	key := getAssetPath(mediaType)
+	key = path.Join(directory, key)
 
 	processedPath, err := processVideoForFastStart(tempFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "unable to process temp video for faststart", err)
 		return
 	}
+	defer os.Remove(processedPath)
 
 	processedFile, err := os.Open(processedPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to determine video aspect ratio", err)
 		return
 	}
-	defer os.Remove(processedFile.Name())
 	defer processedFile.Close()
 
-	aspectRatio, err := getVideoAspectRatio(processedPath)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to determine video aspect ratio", err)
-		return
-	}
-
-	vidID := make([]byte, 32)
-	rand.Read(vidID)
-	vidKey := fmt.Sprintf("%s/%v.%s", aspectRatio, base64.URLEncoding.EncodeToString(vidID), getFileExtension(mediaType))
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
-		Bucket:      &cfg.s3Bucket,
-		Key:         &vidKey,
+		Bucket:      aws.String(cfg.s3Bucket),
+		Key:         aws.String(key),
 		Body:        processedFile,
-		ContentType: &mediaType,
+		ContentType: aws.String(mediaType),
 	})
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to upload video to s3", err)
 		return
 	}
 
-	vidURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, vidKey)
-	vidMetadata.VideoURL = &vidURL
-	err = cfg.db.UpdateVideo(vidMetadata)
+	url := cfg.getObjectURL(key)
+	video.VideoURL = &url
+	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to write updated video metadata to db", err)
 	}
@@ -148,4 +164,45 @@ func processVideoForFastStart(filePath string) (string, error) {
 	}
 
 	return outPath, nil
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command(
+		"ffprobe",
+		"-v", "error",
+		"-print_format", "json",
+		"-show_streams",
+		filePath,
+	)
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffprobe error: %v", err)
+	}
+
+	var output struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		return "", fmt.Errorf("could not parse ffprobe output: %v", err)
+	}
+
+	if len(output.Streams) == 0 {
+		return "", errors.New("no video streams found")
+	}
+
+	width := output.Streams[0].Width
+	height := output.Streams[0].Height
+
+	if width == 16*height/9 {
+		return "16:9", nil
+	} else if height == 16*width/9 {
+		return "9:16", nil
+	}
+	return "other", nil
 }
