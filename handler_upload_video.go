@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -138,11 +139,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	url := cfg.getObjectURL(key)
+	url := strings.Replace(cfg.getObjectURL(key), fmt.Sprintf("%s.s3.%s.amazonaws.com", cfg.s3Bucket, cfg.s3Region), cfg.s3CfDistribution, -1)
 	video.VideoURL = &url
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "unable to write updated video metadata to db", err)
+		respondWithError(w, http.StatusInternalServerError, "unable to write delimited url to video db", err)
+		return
 	}
 
 	respondWithJSON(w, http.StatusOK, database.Video{})
